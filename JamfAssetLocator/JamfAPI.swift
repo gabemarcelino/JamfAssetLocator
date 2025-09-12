@@ -41,6 +41,16 @@ struct JamfAPI {
     // Runtime logging toggle (set true to force logs in any build)
     private static let verboseLogging: Bool = true
 
+    // Unique build/runtime signature for diagnostics
+    private static let buildSignature: String = {
+        // Simple timestamp-based signature so each build/run is easy to identify
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        let ts = formatter.string(from: Date())
+        // You can also hardcode a manual token if you want to track a specific change.
+        return "JamfAPI.swift signature: \(ts)"
+    }()
+
     // MARK: - In-memory token caches (no Keychain)
     private static let expirySkew: TimeInterval = 60
 
@@ -55,6 +65,10 @@ struct JamfAPI {
     private var classicFetchTask: Task<(token: String, expiry: Date), Error>?
 
     init?(config: ManagedConfig) {
+        if Self.shouldLog() {
+            print(Self.buildSignature)
+        }
+
         guard let urlStr = config.jamfURL?.trimmingCharacters(in: .whitespacesAndNewlines),
               !urlStr.isEmpty,
               let url = URL(string: urlStr) else {
@@ -687,6 +701,25 @@ struct JamfAPI {
     }
 
     // MARK: - Diagnostics
+
+    // Modern diagnose: GET a modern endpoint and return a short JSON preview string
+    mutating func diagnoseModernAccess(deviceID: String) async throws -> String {
+        let url = baseURL.appendingPathComponent("/api/v2/mobile-devices/\(deviceID)")
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        logRequest(req)
+
+        let (data, http) = try await authorizedModernRequest(req)
+        guard (200...299).contains(http.statusCode) else {
+            let bodyStr = String(data: data, encoding: .utf8)
+            logBodyIfError(bodyStr)
+            throw JamfAPIError.badResponse(status: http.statusCode, body: bodyStr)
+        }
+        let json = String(data: data, encoding: .utf8) ?? ""
+        return String(json.prefix(2048))
+    }
 
     mutating func diagnoseClassicAccess(deviceID: String) async throws -> String {
         let token = try await validClassicToken()
