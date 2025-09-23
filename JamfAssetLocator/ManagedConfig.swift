@@ -54,7 +54,10 @@ struct ManagedConfig {
             "MANDATORY_CONTACT": true,
             "MANDATORY_DEPARTMENT": true,
             "MANDATORY_BUILDING": true,
-            "MANDATORY_ASSET_TAG": false // set to true to require asset tag
+            "MANDATORY_ASSET_TAG": false, // set to true to require asset tag
+
+            // Logging control (optional; if absent, logs stay quiet)
+            "LOG_VERBOSE": false
         ]
         #else
         self.dict = (UserDefaults.standard.object(forKey: "com.apple.configuration.managed") as? [String: Any]) ?? [:]
@@ -121,6 +124,11 @@ struct ManagedConfig {
     var uiRequireDepartment: Bool { (dict["MANDATORY_DEPARTMENT"] as? Bool) ?? false }
     var uiRequireBuilding: Bool { (dict["MANDATORY_BUILDING"] as? Bool) ?? false }
     var uiRequireAssetTag: Bool { (dict["MANDATORY_ASSET_TAG"] as? Bool) ?? false }
+
+    // MARK: - Logging
+
+    // If present in managed config, overrides default logging behavior.
+    var logVerboseOverride: Bool? { dict["LOG_VERBOSE"] as? Bool }
 }
 
 private extension String {

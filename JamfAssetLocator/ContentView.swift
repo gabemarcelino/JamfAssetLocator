@@ -120,8 +120,11 @@ struct ContentView: View {
         .onAppear {
             if contact.isEmpty, let user = config.jamfUsername { contact = user }
             Task {
-                await refreshLists()
-                await loadExistingLocation() // prefill after lists start loading
+                // Load lists and current location in parallel for faster prefill
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask { await refreshLists() }
+                    group.addTask { await loadExistingLocation() }
+                }
             }
         }
         .statusOverlay(text: status, isPresented: $showStatus)
@@ -168,7 +171,13 @@ struct ContentView: View {
 
         ToolbarItem(placement: .navigationBarLeading) {
             Button {
-                Task { await refreshLists() }
+                Task {
+                    // Refresh both the lists and the current device snapshot
+                    await withTaskGroup(of: Void.self) { group in
+                        group.addTask { await refreshLists() }
+                        group.addTask { await loadExistingLocation() }
+                    }
+                }
             } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }
@@ -478,6 +487,7 @@ struct ContentView: View {
                     if let rn = snap.realName, !rn.isEmpty { self.contact = rn }
                     if let em = snap.email, !em.isEmpty { self.email = em }
                     if let rm = snap.room, !rm.isEmpty { self.room = rm }
+                    if let at = snap.assetTag, !at.isEmpty { self.assetTag = at }
                     // Hold IDs; names will be resolved once lists are ready
                     self.pendingBuildingId = snap.buildingId
                     self.pendingDepartmentId = snap.departmentId
@@ -491,6 +501,7 @@ struct ContentView: View {
                     if let rn = snap.realName, !rn.isEmpty { self.contact = rn }
                     if let em = snap.email, !em.isEmpty { self.email = em }
                     if let rm = snap.room, !rm.isEmpty { self.room = rm }
+                    if let at = snap.assetTag, !at.isEmpty { self.assetTag = at }
                     if let b = snap.buildingName, !b.isEmpty { self.office = b }
                     if let d = snap.departmentName, !d.isEmpty { self.department = d }
                 }

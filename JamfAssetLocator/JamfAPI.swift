@@ -38,8 +38,8 @@ struct JamfAPI {
     let clientID: String?
     let clientSecret: String?
 
-    // Runtime logging toggle (set true to force logs in any build)
-    private static let verboseLogging: Bool = true
+    // Logging control: nil = default to build configuration; true/false = forced override
+    private static var loggingOverride: Bool? = nil
 
     // Unique build/runtime signature for diagnostics
     private static let buildSignature: String = {
@@ -49,20 +49,23 @@ struct JamfAPI {
         return "JamfAPI.swift signature: \(ts)"
     }()
 
-    // MARK: - In-memory token caches (no Keychain)
+    // MARK: - In-memory token caches (shared across all instances; no Keychain)
     private static let expirySkew: TimeInterval = 60
 
-    // OAuth (/api/oauth/token) cache
-    private var oauthToken: String?
-    private var oauthExpiry: Date?
-    private var oauthFetchTask: Task<(token: String, expiry: Date), Error>?
+    // OAuth (/api/oauth/token) cache (static/shared)
+    private static var oauthToken: String?
+    private static var oauthExpiry: Date?
+    private static var oauthFetchTask: Task<(token: String, expiry: Date), Error>?
 
-    // Classic (/api/v1/auth/token) cache
-    private var classicToken: String?
-    private var classicExpiry: Date?
-    private var classicFetchTask: Task<(token: String, expiry: Date), Error>?
+    // Classic (/api/v1/auth/token) cache (static/shared)
+    private static var classicToken: String?
+    private static var classicExpiry: Date?
+    private static var classicFetchTask: Task<(token: String, expiry: Date), Error>?
 
     init?(config: ManagedConfig) {
+        // Allow managed config to control logging (quiet by default unless explicitly enabled)
+        Self.loggingOverride = config.logVerboseOverride
+
         if Self.shouldLog() {
             print(Self.buildSignature)
         }
@@ -70,7 +73,7 @@ struct JamfAPI {
         guard let urlStr = config.jamfURL?.trimmingCharacters(in: .whitespacesAndNewlines),
               !urlStr.isEmpty,
               let url = URL(string: urlStr) else {
-            if Self.verboseLogging {
+            if Self.shouldLog() {
                 print("JamfAPI.init: invalid config (missing or invalid JAMF_URL)")
             }
             return nil
@@ -89,7 +92,7 @@ struct JamfAPI {
         self.username = rawUsername?.nilIfEmpty
         self.password = rawPassword?.nilIfEmpty
 
-        if Self.verboseLogging {
+        if Self.shouldLogDetailed() {
             let hasOAuthID = (self.clientID != nil)
             let hasOAuthSecret = (self.clientSecret != nil)
             let hasUser = (self.username != nil)
@@ -101,7 +104,7 @@ struct JamfAPI {
         let classicComplete = (self.username != nil && self.password != nil)
 
         if !oauthComplete && !classicComplete {
-            if Self.verboseLogging {
+            if Self.shouldLog() {
                 var reasons: [String] = []
                 if !(self.clientID != nil) { reasons.append("missing clientID") }
                 if !(self.clientSecret != nil) { reasons.append("missing clientSecret") }
@@ -130,13 +133,13 @@ struct JamfAPI {
     }
 
     private mutating func validOAuthToken() async throws -> String {
-        if let token = oauthToken, let expiry = oauthExpiry, Date() < expiry.addingTimeInterval(-Self.expirySkew) {
+        if let token = Self.oauthToken, let expiry = Self.oauthExpiry, Date() < expiry.addingTimeInterval(-Self.expirySkew) {
             return token
         }
 
-        if let task = oauthFetchTask {
+        if let task = Self.oauthFetchTask {
             let result = try await task.value
-            setOAuthCache(token: result.token, expiry: result.expiry)
+            Self.setOAuthCache(token: result.token, expiry: result.expiry)
             return result.token
         }
 
@@ -149,17 +152,17 @@ struct JamfAPI {
             let expiry = Date().addingTimeInterval(25 * 60)
             return (raw, expiry)
         }
-        oauthFetchTask = task
-        defer { oauthFetchTask = nil }
+        Self.oauthFetchTask = task
+        defer { Self.oauthFetchTask = nil }
 
         let result = try await task.value
-        setOAuthCache(token: result.token, expiry: result.expiry)
+        Self.setOAuthCache(token: result.token, expiry: result.expiry)
         return result.token
     }
 
-    private mutating func setOAuthCache(token: String, expiry: Date) {
-        self.oauthToken = token
-        self.oauthExpiry = expiry
+    private static func setOAuthCache(token: String, expiry: Date) {
+        Self.oauthToken = token
+        Self.oauthExpiry = expiry
     }
 
     private static func fetchOAuthToken(baseURL: URL, clientID: String?, clientSecret: String?) async throws -> String {
@@ -193,7 +196,8 @@ struct JamfAPI {
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
 
-        logRequest(req, bodyPreview: bodyString)
+        // Do NOT log body; contains client_secret
+        logRequest(req, redacting: ["Authorization"])
 
         let (data, resp) = try await URLSession.shared.data(for: req)
 
@@ -237,7 +241,8 @@ struct JamfAPI {
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
 
-        JamfAPI.logRequest(req, bodyPreview: bodyString)
+        // Do NOT log body; contains client_secret
+        JamfAPI.logRequest(req, redacting: ["Authorization"])
 
         let (data, resp) = try await URLSession.shared.data(for: req)
 
@@ -279,7 +284,8 @@ struct JamfAPI {
         let base64Login = loginData.base64EncodedString()
         req.setValue("Basic \(base64Login)", forHTTPHeaderField: "Authorization")
 
-        logRequest(req, redacting: ["Authorization"], bodyPreview: body)
+        // Avoid logging body for token endpoints; always redact Authorization
+        logRequest(req, redacting: ["Authorization"])
 
         let (data, resp) = try await URLSession.shared.data(for: req)
 
@@ -321,7 +327,8 @@ struct JamfAPI {
         let base64Login = loginData.base64EncodedString()
         req.setValue("Basic \(base64Login)", forHTTPHeaderField: "Authorization")
 
-        JamfAPI.logRequest(req, redacting: ["Authorization"], bodyPreview: body)
+        // Avoid logging body for token endpoints; always redact Authorization
+        JamfAPI.logRequest(req, redacting: ["Authorization"])
 
         let (data, resp) = try await URLSession.shared.data(for: req)
 
@@ -347,7 +354,7 @@ struct JamfAPI {
 
     // MARK: - Modern API models
 
-    struct PagedResponse<T: Codable>: Codable {
+    struct PagedResponse<T: Decodable>: Decodable {
         let totalCount: Int
         let results: [T]
     }
@@ -362,8 +369,9 @@ struct JamfAPI {
         let name: String
     }
 
-    struct MobileDevice: Codable {
-        struct Location: Codable {
+    // Decode-only; structure can vary across Jamf versions
+    struct MobileDevice: Decodable {
+        struct Location: Decodable {
             var username: String?
             var realName: String?
             var emailAddress: String?
@@ -372,12 +380,112 @@ struct JamfAPI {
             var departmentId: String?
             var buildingId: String?
             var room: String?
+
+            enum CodingKeys: String, CodingKey {
+                case username
+                case realName, real_name
+                case emailAddress, email
+                case position
+                case phoneNumber, phone_number
+                case departmentId, department_id
+                case buildingId, building_id
+                case room
+            }
+
+            init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+                self.username = try c.decodeIfPresent(String.self, forKey: .username)
+
+                self.realName = try c.decodeIfPresent(String.self, forKey: .realName)
+                    ?? c.decodeIfPresent(String.self, forKey: .real_name)
+
+                self.emailAddress = try c.decodeIfPresent(String.self, forKey: .emailAddress)
+                    ?? c.decodeIfPresent(String.self, forKey: .email)
+
+                self.position = try c.decodeIfPresent(String.self, forKey: .position)
+
+                self.phoneNumber = try c.decodeIfPresent(String.self, forKey: .phoneNumber)
+                    ?? c.decodeIfPresent(String.self, forKey: .phone_number)
+
+                if let s = try c.decodeIfPresent(String.self, forKey: .departmentId) {
+                    self.departmentId = s
+                } else if let s = try c.decodeIfPresent(String.self, forKey: .department_id) {
+                    self.departmentId = s
+                } else if let i = try c.decodeIfPresent(Int.self, forKey: .departmentId) {
+                    self.departmentId = String(i)
+                } else if let i = try c.decodeIfPresent(Int.self, forKey: .department_id) {
+                    self.departmentId = String(i)
+                }
+
+                if let s = try c.decodeIfPresent(String.self, forKey: .buildingId) {
+                    self.buildingId = s
+                } else if let s = try c.decodeIfPresent(String.self, forKey: .building_id) {
+                    self.buildingId = s
+                } else if let i = try c.decodeIfPresent(Int.self, forKey: .buildingId) {
+                    self.buildingId = String(i)
+                } else if let i = try c.decodeIfPresent(Int.self, forKey: .building_id) {
+                    self.buildingId = String(i)
+                }
+
+                self.room = try c.decodeIfPresent(String.self, forKey: .room)
+            }
+
+            init() {}
         }
+
         var name: String?
         var assetTag: String?
         var siteId: String?
         var timeZone: String?
         var location: Location?
+
+        enum CodingKeys: String, CodingKey {
+            case name
+            case assetTag, asset_tag
+            case siteId, site_id
+            case timeZone, time_zone
+            case location
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            self.name = try c.decodeIfPresent(String.self, forKey: .name)
+
+            self.assetTag = try c.decodeIfPresent(String.self, forKey: .assetTag)
+                ?? c.decodeIfPresent(String.self, forKey: .asset_tag)
+
+            if let s = try c.decodeIfPresent(String.self, forKey: .siteId) {
+                self.siteId = s
+            } else if let s = try c.decodeIfPresent(String.self, forKey: .site_id) {
+                self.siteId = s
+            } else if let i = try c.decodeIfPresent(Int.self, forKey: .siteId) {
+                self.siteId = String(i)
+            } else if let i = try c.decodeIfPresent(Int.self, forKey: .site_id) {
+                self.siteId = String(i)
+            }
+
+            self.timeZone = try c.decodeIfPresent(String.self, forKey: .timeZone)
+                ?? c.decodeIfPresent(String.self, forKey: .time_zone)
+
+            self.location = try c.decodeIfPresent(Location.self, forKey: .location)
+        }
+    }
+
+    // New: v2 details endpoint (often contains assetTag + location)
+    struct MobileDeviceDetails: Decodable {
+        struct General: Decodable {
+            var assetTag: String?
+            enum CodingKeys: String, CodingKey {
+                case assetTag, asset_tag
+            }
+            init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+                self.assetTag = try c.decodeIfPresent(String.self, forKey: .assetTag)
+                    ?? c.decodeIfPresent(String.self, forKey: .asset_tag)
+            }
+        }
+        var general: General?
+        var location: MobileDevice.Location?
     }
 
     struct MobileDevicePatch: Codable {
@@ -399,6 +507,24 @@ struct JamfAPI {
         var location: Location?
     }
 
+    // Fallback inventory model (richer payload; v1 inventory API)
+    struct MobileDeviceInventory: Decodable {
+        var assetTag: String?
+        var location: MobileDevice.Location?
+
+        enum CodingKeys: String, CodingKey {
+            case assetTag, asset_tag
+            case location
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            self.assetTag = try c.decodeIfPresent(String.self, forKey: .assetTag)
+                ?? c.decodeIfPresent(String.self, forKey: .asset_tag)
+            self.location = try c.decodeIfPresent(MobileDevice.Location.self, forKey: .location)
+        }
+    }
+
     // MARK: - Modern API helpers
 
     private mutating func authorizedModernRequest(_ req: URLRequest) async throws -> (Data, HTTPURLResponse) {
@@ -413,8 +539,7 @@ struct JamfAPI {
             if Self.shouldLog() {
                 print("✅ \(req.httpMethod ?? "GET") \(req.url?.absoluteString ?? "") -> \(http.statusCode)")
             }
-        }
-        if http.statusCode == 401 {
+        } else if http.statusCode == 401 {
             if Self.shouldLog() {
                 print("🔁 401 Unauthorized, re-auth and retry: \(req.url?.absoluteString ?? "")")
             }
@@ -430,8 +555,12 @@ struct JamfAPI {
                 if Self.shouldLog() {
                     print("✅ \(retry.httpMethod ?? "GET") \(retry.url?.absoluteString ?? "") -> \(h2.statusCode) (after retry)")
                 }
+            } else if h2.statusCode == 403, Self.shouldLog() {
+                Self.logPrivilegeHint(method: retry.httpMethod, url: retry.url, status: h2.statusCode)
             }
             return (d2, h2)
+        } else if http.statusCode == 403, Self.shouldLog() {
+            Self.logPrivilegeHint(method: req.httpMethod, url: req.url, status: http.statusCode)
         }
         return (data, http)
     }
@@ -524,6 +653,124 @@ struct JamfAPI {
         return try JSONDecoder().decode(MobileDevice.self, from: data)
     }
 
+    // New: richer v2 details endpoint (try before inventory)
+    mutating func getMobileDeviceDetailsModern(id: String) async throws -> MobileDeviceDetails? {
+        let url = baseURL.appendingPathComponent("/api/v2/mobile-devices/\(id)/detail")
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        logRequest(req)
+
+        let (data, http) = try await authorizedModernRequest(req)
+        if (200...299).contains(http.statusCode) {
+            do {
+                let details = try JSONDecoder().decode(MobileDeviceDetails.self, from: data)
+                if Self.shouldLog() {
+                    print("📄 Details for device \(id) decoded")
+                }
+                return details
+            } catch {
+                if Self.shouldLog() {
+                    let preview = String(data: data, encoding: .utf8) ?? ""
+                    print("⚠️ Details decode failed, raw preview:\n\(String(preview.prefix(1024)))")
+                }
+                throw error
+            }
+        } else if http.statusCode == 404 {
+            // Some Jamf versions don’t have this endpoint; treat as unavailable.
+            if Self.shouldLog() {
+                let body = String(data: data, encoding: .utf8)
+                logBodyIfError(body)
+                print("ℹ️ Details endpoint returned 404 for \(id); skipping.")
+            }
+            return nil
+        } else {
+            let body = String(data: data, encoding: .utf8)
+            logBodyIfError(body)
+            throw JamfAPIError.badResponse(status: http.statusCode, body: body)
+        }
+    }
+
+    // Fallback: richer inventory endpoint (often includes location/assetTag)
+    mutating func getMobileDeviceInventoryModern(id: String) async throws -> MobileDeviceInventory? {
+        // First attempt: filter=id=={id}
+        func requestInventory(with queryItems: [URLQueryItem], label: String) async throws -> (MobileDeviceInventory?, HTTPURLResponse) {
+            var comps = URLComponents(url: baseURL.appendingPathComponent("/api/v1/mobile-devices-inventory"), resolvingAgainstBaseURL: false)!
+            comps.queryItems = queryItems
+            guard let url = comps.url else { throw JamfAPIError.invalidConfig }
+            var req = URLRequest(url: url)
+            req.httpMethod = "GET"
+            req.setValue("application/json", forHTTPHeaderField: "Accept")
+
+            logRequest(req)
+
+            let (data, http) = try await authorizedModernRequest(req)
+            if (200...299).contains(http.statusCode) {
+                do {
+                    let pageResp = try JSONDecoder().decode(PagedResponse<MobileDeviceInventory>.self, from: data)
+                    if Self.shouldLog() {
+                        print("📦 Inventory(\(label)) returned \(pageResp.totalCount) result(s) for id \(id)")
+                    }
+                    return (pageResp.results.first, http)
+                } catch {
+                    if Self.shouldLog() {
+                        let preview = String(data: data, encoding: .utf8) ?? ""
+                        print("⚠️ Inventory(\(label)) decode failed, raw preview:\n\(String(preview.prefix(1024)))")
+                    }
+                    throw error
+                }
+            } else {
+                let bodyStr = String(data: data, encoding: .utf8)
+                logBodyIfError(bodyStr)
+                return (nil, http)
+            }
+        }
+
+        // Try filter form
+        let (firstResult, firstHTTP) = try await requestInventory(
+            with: [
+                URLQueryItem(name: "filter", value: "id==\(id)"),
+                URLQueryItem(name: "page-size", value: "1")
+            ],
+            label: "filter"
+        )
+
+        if (200...299).contains(firstHTTP.statusCode) {
+            return firstResult
+        }
+
+        // If 404 (not found/unsupported), try alternate ids= form (some Jamf versions prefer this)
+        if firstHTTP.statusCode == 404 {
+            if Self.shouldLog() {
+                print("ℹ️ Inventory filter form returned 404; trying ids= variant for id \(id)")
+            }
+            let (secondResult, secondHTTP) = try await requestInventory(
+                with: [
+                    URLQueryItem(name: "ids", value: id),
+                    URLQueryItem(name: "section", value: "GENERAL"),
+                    URLQueryItem(name: "page-size", value: "1")
+                ],
+                label: "ids"
+            )
+            if (200...299).contains(secondHTTP.statusCode) {
+                return secondResult
+            }
+            if secondHTTP.statusCode == 404 {
+                // Graceful: treat as "no results"
+                if Self.shouldLog() {
+                    print("ℹ️ Inventory ids form also returned 404; treating as no results for id \(id)")
+                }
+                return nil
+            }
+            // Other error codes: bubble up
+            throw JamfAPIError.badResponse(status: secondHTTP.statusCode, body: nil)
+        }
+
+        // Other error codes from the first attempt: bubble up
+        throw JamfAPIError.badResponse(status: firstHTTP.statusCode, body: nil)
+    }
+
     mutating func patchMobileDeviceModern(id: String, payload: MobileDevicePatch) async throws {
         let url = baseURL.appendingPathComponent("/api/v2/mobile-devices/\(id)")
         var req = URLRequest(url: url)
@@ -533,6 +780,7 @@ struct JamfAPI {
         let body = try JSONEncoder().encode(payload)
         req.httpBody = body
 
+        // Only show minimal request line by default; body preview logged only in verbose mode
         logRequest(req, bodyPreview: String(data: body, encoding: .utf8))
 
         let (data, http) = try await authorizedModernRequest(req)
@@ -543,7 +791,7 @@ struct JamfAPI {
         }
         if Self.shouldLog() {
             let respPreview = String(data: data, encoding: .utf8)
-            if let respPreview, !respPreview.isEmpty {
+            if let respPreview, !respPreview.isEmpty, Self.shouldLogDetailed() {
                 print("✅ PATCH mobile device \(id) succeeded with status \(http.statusCode). Response:\n\(respPreview)")
             } else {
                 print("✅ PATCH mobile device \(id) succeeded with status \(http.statusCode).")
@@ -630,18 +878,17 @@ struct JamfAPI {
     }
 
     private mutating func validClassicToken() async throws -> String {
-        if let token = classicToken, let expiry = classicExpiry, Date() < expiry.addingTimeInterval(-Self.expirySkew) {
+        if let token = Self.classicToken, let expiry = Self.classicExpiry, Date() < expiry.addingTimeInterval(-Self.expirySkew) {
             return token
         }
 
-        if let task = classicFetchTask {
+        if let task = Self.classicFetchTask {
             let result = try await task.value
-            setClassicCache(token: result.token, expiry: result.expiry)
+            Self.setClassicCache(token: result.token, expiry: result.expiry)
             return result.token
         }
 
         let baseURL = self.baseURL
-        theUsername: do {}
         let username = self.username
         let password = self.password
 
@@ -650,17 +897,17 @@ struct JamfAPI {
             let expiry = Date().addingTimeInterval(25 * 60)
             return (token, expiry)
         }
-        classicFetchTask = task
-        defer { classicFetchTask = nil }
+        Self.classicFetchTask = task
+        defer { Self.classicFetchTask = nil }
 
         let result = try await task.value
-        setClassicCache(token: result.token, expiry: result.expiry)
+        Self.setClassicCache(token: result.token, expiry: result.expiry)
         return result.token
     }
 
-    private mutating func setClassicCache(token: String, expiry: Date) {
-        self.classicToken = token
-        self.classicExpiry = expiry
+    private static func setClassicCache(token: String, expiry: Date) {
+        Self.classicToken = token
+        Self.classicExpiry = expiry
     }
 
     mutating func updateLocation(deviceID: String, username: String?, realName: String?, email: String?, building: String?, department: String?, room: String?) async throws {
@@ -855,6 +1102,7 @@ struct JamfAPI {
         var realName: String?
         var email: String?
         var room: String?
+        var assetTag: String?
 
         // Modern IDs when available
         var buildingId: String?
@@ -867,12 +1115,52 @@ struct JamfAPI {
 
     mutating func fetchCurrentLocationModern(id: String) async throws -> LocationSnapshot {
         let device = try await getMobileDeviceModern(id: id)
-        let loc = device.location
+        if Self.shouldLogDetailed() {
+            print("Decoded MobileDevice for \(id): \(device)")
+        }
+        var loc = device.location
+        var tag = device.assetTag
+
+        // Try v2 details (often includes both)
+        if (loc == nil) || (tag == nil) {
+            do {
+                if let details = try await getMobileDeviceDetailsModern(id: id) {
+                    if tag == nil { tag = details.general?.assetTag }
+                    if loc == nil { loc = details.location }
+                }
+            } catch {
+                if Self.shouldLog() {
+                    print("⚠️ Details request failed for id \(id): \(error.localizedDescription)")
+                }
+            }
+        }
+
+        // Fallback to inventory if still missing
+        if (loc == nil) || (tag == nil) {
+            if Self.shouldLog() {
+                print("ℹ️ Still missing location/assetTag; attempting inventory fallback for id \(id)")
+            }
+            do {
+                if let inv = try await getMobileDeviceInventoryModern(id: id) {
+                    if tag == nil { tag = inv.assetTag }
+                    if loc == nil { loc = inv.location }
+                } else if Self.shouldLog() {
+                    print("⚠️ Inventory returned no results for id \(id)")
+                }
+            } catch {
+                if Self.shouldLog() {
+                    print("⚠️ Inventory request failed for id \(id): \(error.localizedDescription)")
+                }
+                // Continue without failing prefill
+            }
+        }
+
         return LocationSnapshot(
             username: loc?.username,
             realName: loc?.realName,
             email: loc?.emailAddress,
             room: loc?.room,
+            assetTag: tag,
             buildingId: loc?.buildingId,
             departmentId: loc?.departmentId,
             buildingName: nil,
@@ -916,6 +1204,7 @@ struct JamfAPI {
             realName: firstMatch("real_name"),
             email: firstMatch("email"),
             room: firstMatch("room"),
+            assetTag: firstMatch("asset_tag"),
             buildingId: nil,
             departmentId: nil,
             buildingName: firstMatch("building"),
@@ -941,46 +1230,67 @@ struct JamfAPI {
         """
     }
 
-    private static func shouldLog() -> Bool { verboseLogging || _isDebugAssertConfiguration() }
+    private static func shouldLog() -> Bool {
+        // If an override is set (true/false), use it; otherwise default to quiet unless explicitly enabled in Debug.
+        if let override = loggingOverride { return override }
+        return false
+    }
+
+    private static func shouldLogDetailed() -> Bool {
+        // Only when explicitly enabled
+        return loggingOverride == true
+    }
 
     private func logRequest(_ req: URLRequest, redacting headersToRedact: [String] = [], bodyPreview: String? = nil) {
         guard Self.shouldLog() else { return }
-        var headerDump: [String: String] = [:]
-        (req.allHTTPHeaderFields ?? [:]).forEach { k, v in
-            if headersToRedact.contains(k) {
-                headerDump[k] = "REDACTED"
-            } else {
-                headerDump[k] = v
+        let method = req.httpMethod ?? "GET"
+        let urlStr = req.url?.absoluteString ?? ""
+        print("➡️ \(method) \(urlStr)")
+        if Self.shouldLogDetailed() {
+            let headerDump = JamfAPI.redactedHeaders(req.allHTTPHeaderFields ?? [:], extra: headersToRedact)
+            print("Headers: \(headerDump)")
+            if let bodyPreview, !bodyPreview.isEmpty {
+                print("Body (preview):\n\(bodyPreview)")
             }
-        }
-        print("➡️ \(req.httpMethod ?? "GET") \(req.url?.absoluteString ?? "")")
-        print("Headers: \(headerDump)")
-        if let bodyPreview, !bodyPreview.isEmpty {
-            print("Body (preview):\n\(bodyPreview)")
         }
     }
 
     private func logBodyIfError(_ body: String?) {
         guard Self.shouldLog() else { return }
         if let body, !body.isEmpty {
-            print("Body:\n\(body)")
+            let preview = String(body.prefix(2048))
+            let suffix = body.count > 2048 ? "\n…(truncated)" : ""
+            print("Body:\n\(preview)\(suffix)")
         }
     }
 
     private static func logRequest(_ req: URLRequest, redacting headersToRedact: [String] = [], bodyPreview: String? = nil) {
         guard shouldLog() else { return }
-        var headerDump: [String: String] = [:]
-        (req.allHTTPHeaderFields ?? [:]).forEach { k, v in
-            if headersToRedact.contains(k) {
-                headerDump[k] = "REDACTED"
-            } else {
-                headerDump[k] = v
+        let method = req.httpMethod ?? "GET"
+        let urlStr = req.url?.absoluteString ?? ""
+        print("➡️ \(method) \(urlStr)")
+        if shouldLogDetailed() {
+            let headerDump = redactedHeaders(req.allHTTPHeaderFields ?? [:], extra: headersToRedact)
+            print("Headers: \(headerDump)")
+            if let bodyPreview, !bodyPreview.isEmpty {
+                print("Body (preview):\n\(bodyPreview)")
             }
         }
-        print("➡️ \(req.httpMethod ?? "GET") \(req.url?.absoluteString ?? "")")
-        print("Headers: \(headerDump)")
-        if let bodyPreview, !bodyPreview.isEmpty {
-            print("Body (preview):\n\(bodyPreview)")
+    }
+
+    private static func redactedHeaders(_ headers: [String: String], extra: [String]) -> [String: String] {
+        let sensitive = Set(extra.map { $0.lowercased() })
+        return headers.reduce(into: [String: String]()) { acc, kv in
+            let (k, v) = kv
+            let lower = k.lowercased()
+            let shouldRedact =
+                sensitive.contains(lower) ||
+                lower.contains("authorization") ||
+                lower.contains("token") ||
+                lower.contains("secret") ||
+                lower.contains("password") ||
+                lower.contains("cookie")
+            acc[k] = shouldRedact ? "REDACTED" : v
         }
     }
 
@@ -1006,8 +1316,29 @@ struct JamfAPI {
     private static func logBodyIfError(_ body: String?) {
         guard shouldLog() else { return }
         if let body, !body.isEmpty {
-            print("Body:\n\(body)")
+            let preview = String(body.prefix(2048))
+            let suffix = body.count > 2048 ? "\n…(truncated)" : ""
+            print("Body:\n\(preview)\(suffix)")
         }
+    }
+
+    private static func logPrivilegeHint(method: String?, url: URL?, status: Int) {
+        guard let path = url?.path else {
+            print("🚫 \(method ?? "REQUEST") -> \(status) Forbidden")
+            return
+        }
+        var hint = ""
+        switch true {
+        case path.hasPrefix("/api/v2/mobile-devices") || path.hasPrefix("/api/v1/mobile-devices-inventory"):
+            hint = "Missing privilege? Grant 'Read Mobile Devices' (and 'Update Mobile Devices' for PATCH)."
+        case path.hasPrefix("/api/v1/buildings"):
+            hint = "Missing privilege? Grant 'Read Buildings'."
+        case path.hasPrefix("/api/v1/departments"):
+            hint = "Missing privilege? Grant 'Read Departments'."
+        default:
+            hint = "Check the API role privileges for this endpoint."
+        }
+        print("🚫 \(method ?? "REQUEST") \(path) -> \(status) Forbidden. \(hint)")
     }
 }
 
@@ -1022,3 +1353,4 @@ private extension String {
     }
     var nilIfEmpty: String? { isEmpty ? nil : self }
 }
+
