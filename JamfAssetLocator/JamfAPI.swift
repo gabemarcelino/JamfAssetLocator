@@ -43,11 +43,9 @@ struct JamfAPI {
 
     // Unique build/runtime signature for diagnostics
     private static let buildSignature: String = {
-        // Simple timestamp-based signature so each build/run is easy to identify
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
         let ts = formatter.string(from: Date())
-        // You can also hardcode a manual token if you want to track a specific change.
         return "JamfAPI.swift signature: \(ts)"
     }()
 
@@ -91,7 +89,6 @@ struct JamfAPI {
         self.username = rawUsername?.nilIfEmpty
         self.password = rawPassword?.nilIfEmpty
 
-        // Diagnostics: show what we have (without secrets)
         if Self.verboseLogging {
             let hasOAuthID = (self.clientID != nil)
             let hasOAuthSecret = (self.clientSecret != nil)
@@ -100,7 +97,6 @@ struct JamfAPI {
             print("JamfAPI.init: URL ok. OAuth(clientID:\(hasOAuthID), clientSecret:\(hasOAuthSecret)) Classic(username:\(hasUser), password:\(hasPass))")
         }
 
-        // Require at least one complete auth path
         let oauthComplete = (self.clientID != nil && self.clientSecret != nil)
         let classicComplete = (self.username != nil && self.password != nil)
 
@@ -133,7 +129,6 @@ struct JamfAPI {
         }
     }
 
-    // Cached, valid OAuth token (refreshes if expired or missing)
     private mutating func validOAuthToken() async throws -> String {
         if let token = oauthToken, let expiry = oauthExpiry, Date() < expiry.addingTimeInterval(-Self.expirySkew) {
             return token
@@ -151,7 +146,6 @@ struct JamfAPI {
 
         let task = Task<(token: String, expiry: Date), Error> {
             let raw = try await JamfAPI.fetchOAuthToken(baseURL: baseURL, clientID: clientID, clientSecret: clientSecret)
-            // If Jamf returns expires_in, you can parse it; we conservatively set 25 minutes.
             let expiry = Date().addingTimeInterval(25 * 60)
             return (raw, expiry)
         }
@@ -168,7 +162,6 @@ struct JamfAPI {
         self.oauthExpiry = expiry
     }
 
-    // Static helper to avoid capturing self inside Task
     private static func fetchOAuthToken(baseURL: URL, clientID: String?, clientSecret: String?) async throws -> String {
         guard let clientID, let clientSecret else {
             throw JamfAPIError.invalidConfig
@@ -404,7 +397,6 @@ struct JamfAPI {
             var room: String?
         }
         var location: Location?
-        // Not including updatedExtensionAttributes or platform purchasing for now
     }
 
     // MARK: - Modern API helpers
@@ -426,7 +418,6 @@ struct JamfAPI {
             if Self.shouldLog() {
                 print("🔁 401 Unauthorized, re-auth and retry: \(req.url?.absoluteString ?? "")")
             }
-            // Re-auth once
             let _ = try await fetchOAuthToken()
             let token2 = try await validOAuthToken()
             var retry = req
@@ -445,7 +436,7 @@ struct JamfAPI {
         return (data, http)
     }
 
-    // MARK: - Modern API calls (preferred)
+    // MARK: - Modern API calls
 
     mutating func getBuildingsModern(pageSize: Int = 100) async throws -> [Building] {
         var all: [Building] = []
@@ -560,7 +551,7 @@ struct JamfAPI {
         }
     }
 
-    // MARK: - Classic API calls (existing; used as fallback)
+    // MARK: - Classic API calls (fallback)
 
     func fetchBearerToken() async throws -> String {
         guard let username, let password else {
@@ -650,6 +641,7 @@ struct JamfAPI {
         }
 
         let baseURL = self.baseURL
+        theUsername: do {}
         let username = self.username
         let password = self.password
 
@@ -702,7 +694,6 @@ struct JamfAPI {
 
     // MARK: - Diagnostics
 
-    // Modern diagnose: GET a modern endpoint and return a short JSON preview string
     mutating func diagnoseModernAccess(deviceID: String) async throws -> String {
         let url = baseURL.appendingPathComponent("/api/v2/mobile-devices/\(deviceID)")
         var req = URLRequest(url: url)
@@ -731,25 +722,21 @@ struct JamfAPI {
 
         logRequest(req, redacting: ["Authorization"])
 
-        do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await URLSession.shared.data(for: req)
 
-            guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                let bodyStr = String(data: data, encoding: .utf8)
-                logBodyIfError(bodyStr)
-                throw JamfAPIError.badResponse(status: (resp as? HTTPURLResponse)?.statusCode, body: bodyStr)
-            }
-            let xml = String(data: data, encoding: .utf8) ?? ""
-            let preview = String(xml.prefix(2048))
-            return preview
-        } catch {
-            throw JamfAPIError.transport(error)
+        guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            let bodyStr = String(data: data, encoding: .utf8)
+            logBodyIfError(bodyStr)
+            throw JamfAPIError.badResponse(status: (resp as? HTTPURLResponse)?.statusCode, body: bodyStr)
         }
+        let xml = String(data: data, encoding: .utf8) ?? ""
+        let preview = String(xml.prefix(2048))
+        return preview
     }
 
-    // Classic list getters (return names)
+    // MARK: - Classic list getters (return names)
+
     mutating func getBuildings() async throws -> [String] {
-        // Prefer modern if available, else classic names
         if hasOAuth {
             let modern = try await getBuildingsModern()
             return modern.map { $0.name }
@@ -787,7 +774,6 @@ struct JamfAPI {
     }
 
     mutating func getDepartments() async throws -> [String] {
-        // Prefer modern if available, else classic names
         if hasOAuth {
             let modern = try await getDepartmentsModern()
             return modern.map { $0.name }
@@ -862,6 +848,81 @@ struct JamfAPI {
         }
     }
 
+    // MARK: - Prefill helpers
+
+    struct LocationSnapshot {
+        var username: String?
+        var realName: String?
+        var email: String?
+        var room: String?
+
+        // Modern IDs when available
+        var buildingId: String?
+        var departmentId: String?
+
+        // Classic names when available
+        var buildingName: String?
+        var departmentName: String?
+    }
+
+    mutating func fetchCurrentLocationModern(id: String) async throws -> LocationSnapshot {
+        let device = try await getMobileDeviceModern(id: id)
+        let loc = device.location
+        return LocationSnapshot(
+            username: loc?.username,
+            realName: loc?.realName,
+            email: loc?.emailAddress,
+            room: loc?.room,
+            buildingId: loc?.buildingId,
+            departmentId: loc?.departmentId,
+            buildingName: nil,
+            departmentName: nil
+        )
+    }
+
+    mutating func fetchCurrentLocationClassic(id: String) async throws -> LocationSnapshot {
+        let token = try await validClassicToken()
+        let url = baseURL.appendingPathComponent("/JSSResource/mobiledevices/id/\(id)")
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/xml", forHTTPHeaderField: "Accept")
+
+        logRequest(req, redacting: ["Authorization"])
+
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            let bodyStr = String(data: data, encoding: .utf8)
+            logBodyIfError(bodyStr)
+            throw JamfAPIError.badResponse(status: (resp as? HTTPURLResponse)?.statusCode, body: bodyStr)
+        }
+        let xml = String(data: data, encoding: .utf8) ?? ""
+
+        func firstMatch(_ tag: String) -> String? {
+            let pattern = "<\(tag)>(.*?)</\(tag)>"
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
+            let range = NSRange(xml.startIndex..<xml.endIndex, in: xml)
+            if let m = regex.firstMatch(in: xml, options: [], range: range),
+               m.numberOfRanges >= 2,
+               let r = Range(m.range(at: 1), in: xml) {
+                let val = String(xml[r]).trimmingCharacters(in: .whitespacesAndNewlines)
+                return val.isEmpty ? nil : val
+            }
+            return nil
+        }
+
+        return LocationSnapshot(
+            username: firstMatch("username"),
+            realName: firstMatch("real_name"),
+            email: firstMatch("email"),
+            room: firstMatch("room"),
+            buildingId: nil,
+            departmentId: nil,
+            buildingName: firstMatch("building"),
+            departmentName: firstMatch("department")
+        )
+    }
+
     // MARK: - Helpers
 
     private func buildLocationXML(username: String?, realName: String?, email: String?, building: String?, department: String?, room: String?) -> String {
@@ -882,7 +943,6 @@ struct JamfAPI {
 
     private static func shouldLog() -> Bool { verboseLogging || _isDebugAssertConfiguration() }
 
-    // Instance logging
     private func logRequest(_ req: URLRequest, redacting headersToRedact: [String] = [], bodyPreview: String? = nil) {
         guard Self.shouldLog() else { return }
         var headerDump: [String: String] = [:]
@@ -907,7 +967,6 @@ struct JamfAPI {
         }
     }
 
-    // Static logging for use in static helpers
     private static func logRequest(_ req: URLRequest, redacting headersToRedact: [String] = [], bodyPreview: String? = nil) {
         guard shouldLog() else { return }
         var headerDump: [String: String] = [:]
@@ -922,13 +981,6 @@ struct JamfAPI {
         print("Headers: \(headerDump)")
         if let bodyPreview, !bodyPreview.isEmpty {
             print("Body (preview):\n\(bodyPreview)")
-        }
-    }
-
-    private static func logBodyIfError(_ body: String?) {
-        guard shouldLog() else { return }
-        if let body, !body.isEmpty {
-            print("Body:\n\(body)")
         }
     }
 
@@ -948,6 +1000,14 @@ struct JamfAPI {
         if let status { parts.append(" status=\(status)") }
         if let body, !body.isEmpty { parts.append(" body=\(body)") }
         return parts.isEmpty ? "" : " (\(parts.joined()))"
+    }
+
+    // New: static counterpart so static call sites compile
+    private static func logBodyIfError(_ body: String?) {
+        guard shouldLog() else { return }
+        if let body, !body.isEmpty {
+            print("Body:\n\(body)")
+        }
     }
 }
 

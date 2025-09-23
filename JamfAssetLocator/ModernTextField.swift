@@ -41,13 +41,8 @@ struct ModernTextField: View {
             .textInputAutocapitalization(capitalization)
             .keyboardType(keyboard)
             .autocorrectionDisabled(!autocorrection)
-            .textContentType(contentType.map { UITextContentType($0) } ?? .none)
+            .textContentType(contentType) // Pass through the optional directly
             .padding(12)
             .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
-}
-
-private extension UITextContentType {
-    // Helper to allow passing an optional UITextContentType into .textContentType
-    static var none: UITextContentType { .name } // not used; we guard with map above
 }

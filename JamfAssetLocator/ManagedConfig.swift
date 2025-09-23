@@ -33,6 +33,7 @@ struct ManagedConfig {
             "UI_SHOW_ROOM": true,
             "UI_SHOW_CONTACT": true,
             "UI_SHOW_EMAIL": true,
+            "UI_SHOW_ASSET_TAG": true,
 
             "UI_ALLOW_OTHER_BUILDING": true,
             "UI_ALLOW_OTHER_DEPARTMENT": true,
@@ -45,11 +46,15 @@ struct ManagedConfig {
             "UI_DEPARTMENT_LABEL": "Department",
             "UI_ROOM_LABEL": "Room / Desk",
             "UI_CONTACT_LABEL": "Contact Person (Real Name)",
-            "UI_EMAIL_LABEL": "Email",
+            "UI_EMAIL_LABEL": "One Medical Email",
+            "UI_ASSET_TAG_LABEL": "Asset Tag",
 
-            // Asset Tag UI (new)
-            "UI_SHOW_ASSET_TAG": true,
-            "UI_ASSET_TAG_LABEL": "Asset Tag"
+            // Required field controls (DEBUG: test all)
+            "MANDATORY_EMAIL": true,
+            "MANDATORY_CONTACT": true,
+            "MANDATORY_DEPARTMENT": true,
+            "MANDATORY_BUILDING": true,
+            "MANDATORY_ASSET_TAG": false // set to true to require asset tag
         ]
         #else
         self.dict = (UserDefaults.standard.object(forKey: "com.apple.configuration.managed") as? [String: Any]) ?? [:]
@@ -108,6 +113,14 @@ struct ManagedConfig {
     var uiContactLabel: String { (dict["UI_CONTACT_LABEL"] as? String)?.nilIfEmpty ?? "Contact Person (Real Name)" }
     var uiEmailLabel: String { (dict["UI_EMAIL_LABEL"] as? String)?.nilIfEmpty ?? "Email" }
     var uiAssetTagLabel: String { (dict["UI_ASSET_TAG_LABEL"] as? String)?.nilIfEmpty ?? "Asset Tag" } // NEW
+
+    // MARK: - Required (Mandatory) Controls
+
+    var uiRequireEmail: Bool { (dict["MANDATORY_EMAIL"] as? Bool) ?? false }
+    var uiRequireContact: Bool { (dict["MANDATORY_CONTACT"] as? Bool) ?? false }
+    var uiRequireDepartment: Bool { (dict["MANDATORY_DEPARTMENT"] as? Bool) ?? false }
+    var uiRequireBuilding: Bool { (dict["MANDATORY_BUILDING"] as? Bool) ?? false }
+    var uiRequireAssetTag: Bool { (dict["MANDATORY_ASSET_TAG"] as? Bool) ?? false }
 }
 
 private extension String {

@@ -8,13 +8,14 @@
 import SwiftUI
 
 struct ContentView: View {
-    @State private var office: String = ""          // Building ("" means no selection)
-    @State private var otherOffice: String = ""     // Free-form when “Other…” is chosen
+    @State private var office: String = ""          // Building ("" = none)
+    @State private var otherOffice: String = ""
     @State private var department: String = ""
     @State private var otherDepartment: String = ""
     @State private var room: String = ""
     @State private var contact: String = ""         // Real Name
     @State private var email: String = ""
+    @State private var assetTag: String = ""        // NEW: Asset Tag
     @State private var status: String = ""
     @State private var showStatus: Bool = false
 
@@ -30,14 +31,66 @@ struct ContentView: View {
     @State private var nameToBuildingID: [String: String] = [:]
     @State private var nameToDepartmentID: [String: String] = [:]
 
+    // Pending IDs to resolve after lists load (modern)
+    @State private var pendingBuildingId: String?
+    @State private var pendingDepartmentId: String?
+
     private let config = ManagedConfig()
 
-    // Special marker for “Other…” option in pickers
     private let otherMarker = "— Other —"
 
-    // Detect OAuth availability from config (JamfAPI.hasOAuth is private)
     private var oauthAvailable: Bool {
         (config.jamfClientID?.nilIfEmpty != nil) && (config.jamfClientSecret?.nilIfEmpty != nil)
+    }
+
+    // Searchable picker sheets
+    @State private var showBuildingPicker = false
+    @State private var showDepartmentPicker = false
+
+    // Validation flow
+    @State private var attemptedSubmit = false
+
+    // MARK: - Missing field flags (computed after a submit attempt)
+
+    private var buildingMissing: Bool {
+        guard attemptedSubmit, config.uiRequireBuilding else { return false }
+        if office == otherMarker {
+            return otherOffice.nilIfEmpty == nil
+        } else {
+            return office.nilIfEmpty == nil
+        }
+    }
+
+    private var buildingPickerMissingSelection: Bool {
+        guard attemptedSubmit, config.uiRequireBuilding else { return false }
+        // Missing selection (no value chosen at all)
+        return office.nilIfEmpty == nil
+    }
+
+    private var departmentMissing: Bool {
+        guard attemptedSubmit, config.uiRequireDepartment else { return false }
+        if department == otherMarker {
+            return otherDepartment.nilIfEmpty == nil
+        } else {
+            return department.nilIfEmpty == nil
+        }
+    }
+
+    private var departmentPickerMissingSelection: Bool {
+        guard attemptedSubmit, config.uiRequireDepartment else { return false }
+        return department.nilIfEmpty == nil
+    }
+
+    private var emailMissing: Bool {
+        attemptedSubmit && config.uiRequireEmail && email.nilIfEmpty == nil
+    }
+
+    private var contactMissing: Bool {
+        attemptedSubmit && config.uiRequireContact && contact.nilIfEmpty == nil
+    }
+
+    private var assetTagMissing: Bool {
+        attemptedSubmit && config.uiRequireAssetTag && assetTag.nilIfEmpty == nil
     }
 
     var body: some View {
@@ -66,7 +119,10 @@ struct ContentView: View {
         }
         .onAppear {
             if contact.isEmpty, let user = config.jamfUsername { contact = user }
-            Task { await refreshLists() }
+            Task {
+                await refreshLists()
+                await loadExistingLocation() // prefill after lists start loading
+            }
         }
         .statusOverlay(text: status, isPresented: $showStatus)
         .background(
@@ -79,6 +135,24 @@ struct ContentView: View {
             )
             .ignoresSafeArea()
         )
+        .sheet(isPresented: $showBuildingPicker) {
+            SearchablePicker(
+                title: config.uiBuildingLabel,
+                selection: $office,
+                options: effectiveBuildings,
+                includeOther: config.uiAllowOtherBuilding,
+                otherMarker: otherMarker
+            )
+        }
+        .sheet(isPresented: $showDepartmentPicker) {
+            SearchablePicker(
+                title: config.uiDepartmentLabel,
+                selection: $department,
+                options: effectiveDepartments.sorted(),
+                includeOther: config.uiAllowOtherDepartment,
+                otherMarker: otherMarker
+            )
+        }
     }
 
     @ToolbarContentBuilder
@@ -102,7 +176,6 @@ struct ContentView: View {
         }
     }
 
-    // Floating liquid-glass submit button (bottom-right)
     private var floatingSubmitButton: some View {
         VStack {
             Spacer()
@@ -141,43 +214,133 @@ struct ContentView: View {
         ScrollView {
             VStack(spacing: 24) {
                 VStack(spacing: 20) {
+                    // Building
                     if config.uiShowBuilding {
-                        SectionHeader(title: config.uiBuildingLabel, systemImage: "building.2")
+                        SectionHeader(
+                            title: config.uiBuildingLabel + (config.uiRequireBuilding ? " *" : ""),
+                            systemImage: "building.2",
+                            isError: buildingMissing
+                        )
                         if !effectiveBuildings.isEmpty {
-                            MenuPicker(title: "", selection: $office, options: effectiveBuildings, includeOther: config.uiAllowOtherBuilding, otherMarker: otherMarker)
+                            PickerLauncherButton(
+                                label: office.nilIfEmpty ?? "Select \(config.uiBuildingLabel)",
+                                systemImage: "building.2",
+                                isError: buildingPickerMissingSelection,
+                                action: { showBuildingPicker = true }
+                            )
                             if config.uiAllowOtherBuilding && office == otherMarker {
-                                ModernTextField(placeholder: "Type another \(config.uiBuildingLabel.lowercased())", text: $otherOffice, contentType: .none, capitalization: .words)
+                                ModernTextField(
+                                    placeholder: "Type another \(config.uiBuildingLabel.lowercased())",
+                                    text: $otherOffice,
+                                    contentType: .none,
+                                    capitalization: .words
+                                )
+                                .errorHighlight(buildingMissing)
                             }
                         } else {
-                            ModernTextField(placeholder: config.uiBuildingLabel, text: $office, contentType: .none, capitalization: .words)
+                            ModernTextField(
+                                placeholder: config.uiBuildingLabel,
+                                text: $office,
+                                contentType: .none,
+                                capitalization: .words
+                            )
+                            .errorHighlight(buildingMissing)
                         }
                     }
 
+                    // Department
                     if config.uiShowDepartment {
-                        SectionHeader(title: config.uiDepartmentLabel, systemImage: "person.3")
+                        SectionHeader(
+                            title: config.uiDepartmentLabel + (config.uiRequireDepartment ? " *" : ""),
+                            systemImage: "person.3",
+                            isError: departmentMissing
+                        )
                         if !effectiveDepartments.isEmpty {
-                            MenuPicker(title: "", selection: $department, options: effectiveDepartments.sorted(), includeOther: config.uiAllowOtherDepartment, otherMarker: otherMarker)
+                            PickerLauncherButton(
+                                label: department.nilIfEmpty ?? "Select \(config.uiDepartmentLabel)",
+                                systemImage: "person.3",
+                                isError: departmentPickerMissingSelection,
+                                action: { showDepartmentPicker = true }
+                            )
                             if config.uiAllowOtherDepartment && department == otherMarker {
-                                ModernTextField(placeholder: "Type another \(config.uiDepartmentLabel.lowercased())", text: $otherDepartment, contentType: .none, capitalization: .words)
+                                ModernTextField(
+                                    placeholder: "Type another \(config.uiDepartmentLabel.lowercased())",
+                                    text: $otherDepartment,
+                                    contentType: .none,
+                                    capitalization: .words
+                                )
+                                .errorHighlight(departmentMissing)
                             }
                         } else {
-                            ModernTextField(placeholder: config.uiDepartmentLabel, text: $department, contentType: .none, capitalization: .words)
+                            ModernTextField(
+                                placeholder: config.uiDepartmentLabel,
+                                text: $department,
+                                contentType: .none,
+                                capitalization: .words
+                            )
+                            .errorHighlight(departmentMissing)
                         }
                     }
 
+                    // Room
                     if config.uiShowRoom {
                         SectionHeader(title: config.uiRoomLabel, systemImage: "number")
-                        ModernTextField(placeholder: config.uiRoomLabel, text: $room, contentType: .none, capitalization: .words)
+                        ModernTextField(
+                            placeholder: config.uiRoomLabel,
+                            text: $room,
+                            contentType: .none,
+                            capitalization: .words
+                        )
                     }
 
+                    // Contact
                     if config.uiShowContact {
-                        SectionHeader(title: config.uiContactLabel, systemImage: "person.crop.circle")
-                        ModernTextField(placeholder: "Full Name", text: $contact, contentType: .name, capitalization: .words)
+                        SectionHeader(
+                            title: config.uiContactLabel + (config.uiRequireContact ? " *" : ""),
+                            systemImage: "person.crop.circle",
+                            isError: contactMissing
+                        )
+                        ModernTextField(
+                            placeholder: "Full Name",
+                            text: $contact,
+                            contentType: .name,
+                            capitalization: .words
+                        )
+                        .errorHighlight(contactMissing)
                     }
 
+                    // Email
                     if config.uiShowEmail {
-                        SectionHeader(title: config.uiEmailLabel, systemImage: "envelope")
-                        ModernTextField(placeholder: "name@example.com", text: $email, contentType: .emailAddress, capitalization: .never, keyboard: .emailAddress, autocorrection: false)
+                        SectionHeader(
+                            title: config.uiEmailLabel + (config.uiRequireEmail ? " *" : ""),
+                            systemImage: "envelope",
+                            isError: emailMissing
+                        )
+                        ModernTextField(
+                            placeholder: "name@example.com",
+                            text: $email,
+                            contentType: .emailAddress,
+                            capitalization: .never,
+                            keyboard: .emailAddress,
+                            autocorrection: false
+                        )
+                        .errorHighlight(emailMissing)
+                    }
+
+                    // Asset Tag
+                    if config.uiShowAssetTag {
+                        SectionHeader(
+                            title: config.uiAssetTagLabel + (config.uiRequireAssetTag ? " *" : ""),
+                            systemImage: "tag",
+                            isError: assetTagMissing
+                        )
+                        ModernTextField(
+                            placeholder: config.uiAssetTagLabel,
+                            text: $assetTag,
+                            contentType: .none,
+                            capitalization: .never
+                        )
+                        .errorHighlight(assetTagMissing)
                     }
                 }
                 .padding(24)
@@ -187,8 +350,7 @@ struct ContentView: View {
                 .frame(maxWidth: 700)
                 .overlay(alignment: .topTrailing) {
                     if isLoadingBuildings || isLoadingDepartments {
-                        ProgressView()
-                            .padding(16)
+                        ProgressView().padding(16)
                     }
                 }
 
@@ -199,7 +361,8 @@ struct ContentView: View {
         }
     }
 
-    // Effective names for UI pickers
+    // MARK: - Effective lists
+
     private var effectiveBuildings: [String] {
         if oauthAvailable {
             let names = modernBuildings.map { $0.name }
@@ -250,6 +413,7 @@ struct ContentView: View {
                     self.modernBuildings = list
                     self.nameToBuildingID = dict
                     self.buildings = names
+                    resolvePendingBuildingIfNeeded()
                 }
             } else {
                 let names = try await api.getBuildings()
@@ -283,6 +447,7 @@ struct ContentView: View {
                     self.modernDepartments = list
                     self.nameToDepartmentID = dict
                     self.departmentsList = names
+                    resolvePendingDepartmentIfNeeded()
                 }
             } else {
                 let names = try await api.getDepartments()
@@ -299,28 +464,115 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Prefill
+
+    private func loadExistingLocation() async {
+        guard let deviceID = config.jamfDeviceID else { await show("Missing JAMF_DEVICE_ID"); return }
+        guard var api = JamfAPI(config: config) else { await show("Invalid Jamf config"); return }
+
+        do {
+            if oauthAvailable {
+                let snap = try await api.fetchCurrentLocationModern(id: deviceID)
+                await MainActor.run {
+                    // Prefill text fields
+                    if let rn = snap.realName, !rn.isEmpty { self.contact = rn }
+                    if let em = snap.email, !em.isEmpty { self.email = em }
+                    if let rm = snap.room, !rm.isEmpty { self.room = rm }
+                    // Hold IDs; names will be resolved once lists are ready
+                    self.pendingBuildingId = snap.buildingId
+                    self.pendingDepartmentId = snap.departmentId
+                    // Try immediate resolution if lists already loaded
+                    resolvePendingBuildingIfNeeded()
+                    resolvePendingDepartmentIfNeeded()
+                }
+            } else {
+                let snap = try await api.fetchCurrentLocationClassic(id: deviceID)
+                await MainActor.run {
+                    if let rn = snap.realName, !rn.isEmpty { self.contact = rn }
+                    if let em = snap.email, !em.isEmpty { self.email = em }
+                    if let rm = snap.room, !rm.isEmpty { self.room = rm }
+                    if let b = snap.buildingName, !b.isEmpty { self.office = b }
+                    if let d = snap.departmentName, !d.isEmpty { self.department = d }
+                }
+            }
+        } catch let err as JamfAPIError {
+            await show("Prefill failed: \(err.description)")
+        } catch {
+            await show("Prefill failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func resolvePendingBuildingIfNeeded() {
+        guard oauthAvailable, let id = pendingBuildingId, !id.isEmpty else { return }
+        if let name = modernBuildings.first(where: { $0.id == id })?.name {
+            self.office = name
+            self.pendingBuildingId = nil
+        }
+    }
+
+    private func resolvePendingDepartmentIfNeeded() {
+        guard oauthAvailable, let id = pendingDepartmentId, !id.isEmpty else { return }
+        if let name = modernDepartments.first(where: { $0.id == id })?.name {
+            self.department = name
+            self.pendingDepartmentId = nil
+        }
+    }
+
     // MARK: - Submit
 
     private func submit() async {
+        await MainActor.run { attemptedSubmit = true }
         await show("Validating...")
         guard let deviceID = config.jamfDeviceID else { await show("Missing JAMF_DEVICE_ID"); return }
         guard var api = JamfAPI(config: config) else { await show("Invalid Jamf config"); return }
 
         let buildingValue: String? = {
-            if office == otherMarker {
-                return otherOffice.nilIfEmpty
-            } else {
-                return office.nilIfEmpty
-            }
+            if office == otherMarker { return otherOffice.nilIfEmpty }
+            return office.nilIfEmpty
         }()
 
         let departmentValue: String? = {
-            if department == otherMarker {
-                return otherDepartment.nilIfEmpty
-            } else {
-                return department.nilIfEmpty
-            }
+            if department == otherMarker { return otherDepartment.nilIfEmpty }
+            return department.nilIfEmpty
         }()
+
+        // Validation for required fields
+        if config.uiRequireBuilding {
+            if (office == otherMarker && otherOffice.nilIfEmpty == nil) ||
+               (office.nilIfEmpty == nil && !(config.uiAllowOtherBuilding && office == otherMarker)) {
+                await show("\(config.uiBuildingLabel) is required.")
+                return
+            }
+        }
+
+        if config.uiRequireDepartment {
+            if (department == otherMarker && otherDepartment.nilIfEmpty == nil) ||
+                (department.nilIfEmpty == nil && !(config.uiAllowOtherDepartment && department == otherMarker)) {
+                await show("\(config.uiDepartmentLabel) is required.")
+                return
+            }
+        }
+
+        if config.uiRequireEmail {
+            if email.nilIfEmpty == nil {
+                await show("\(config.uiEmailLabel) is required.")
+                return
+            }
+        }
+
+        if config.uiRequireContact {
+            if contact.nilIfEmpty == nil {
+                await show("\(config.uiContactLabel) is required.")
+                return
+            }
+        }
+
+        if config.uiRequireAssetTag {
+            if assetTag.nilIfEmpty == nil {
+                await show("\(config.uiAssetTagLabel) is required.")
+                return
+            }
+        }
 
         if let buildingName = buildingValue, office != otherMarker {
             let validation = await api.validateBuilding(buildingName)
@@ -387,13 +639,14 @@ struct ContentView: View {
                 let patch = JamfAPI.MobileDevicePatch(
                     name: nil,
                     enforceName: nil,
-                    assetTag: nil,
+                    assetTag: assetTag.nilIfEmpty,
                     siteId: nil,
                     timeZone: nil,
                     location: loc
                 )
 
-                try await api.patchMobileDeviceModern(id: deviceID, payload: patch)
+                var api2 = api
+                try await api2.patchMobileDeviceModern(id: deviceID, payload: patch)
                 await show("✓ Updated in Jamf (modern)", success: true)
                 return
             } catch let err as JamfAPIError {
@@ -405,15 +658,15 @@ struct ContentView: View {
             }
         }
 
-        // Fallback: Classic
         do {
-            try await api.updateLocation(deviceID: deviceID,
-                                         username: derivedUsername,
-                                         realName: contact.nilIfEmpty,
-                                         email: email.nilIfEmpty,
-                                         building: buildingValue,
-                                         department: departmentValue,
-                                         room: room.nilIfEmpty)
+            var api2 = api
+            try await api2.updateLocation(deviceID: deviceID,
+                                          username: derivedUsername,
+                                          realName: contact.nilIfEmpty,
+                                          email: email.nilIfEmpty,
+                                          building: buildingValue,
+                                          department: departmentValue,
+                                          room: room.nilIfEmpty)
             await show("✓ Updated in Jamf (classic)", success: true)
         } catch let err as JamfAPIError {
             await show("Update failed (classic): \(err.description)")
@@ -446,134 +699,205 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Helpers
+    // MARK: - UI Components
 
-    private func show(_ text: String, success: Bool = false) async {
-        await MainActor.run {
-            status = text
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.9)) {
-                showStatus = true
+    private struct SectionHeader: View {
+        let title: String
+        let systemImage: String
+        var isError: Bool = false
+        var body: some View {
+            HStack(spacing: 8) {
+                Image(systemName: systemImage)
+                    .foregroundStyle(isError ? .red : .secondary)
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(isError ? .red : .secondary)
+                Spacer()
             }
-            #if os(iOS)
-            let generator = UINotificationFeedbackGenerator()
-            generator.notificationOccurred(success ? .success : .warning)
-            #endif
+            .accessibilityAddTraits(.isHeader)
         }
-        if !text.lowercased().hasPrefix("diagnose success") {
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            await MainActor.run {
-                withAnimation(.easeInOut) { showStatus = false }
+    }
+
+    private struct PickerLauncherButton: View {
+        let label: String
+        let systemImage: String
+        var isError: Bool = false
+        var action: () -> Void
+
+        var body: some View {
+            Button(action: action) {
+                HStack {
+                    Image(systemName: systemImage)
+                        .foregroundStyle(isError ? .red : .secondary)
+                    Text(label)
+                        .foregroundStyle(isError ? .red : (label.isEmpty ? .secondary : .primary))
+                    Spacer()
+                    Image(systemName: "chevron.down")
+                        .foregroundStyle(isError ? AnyShapeStyle(.red) : AnyShapeStyle(.tertiary))
+                }
+                .padding(12)
+                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(isError ? Color.red : Color.clear, lineWidth: 1.5)
+                )
+                .shadow(color: isError ? Color.red.opacity(0.15) : Color.clear, radius: 6)
             }
+            .buttonStyle(.plain)
         }
     }
-}
 
-// MARK: - UI Components
+    private struct SearchablePicker: View {
+        let title: String
+        @Binding var selection: String
+        let options: [String]
+        let includeOther: Bool
+        let otherMarker: String
 
-private struct SectionHeader: View {
-    let title: String
-    let systemImage: String
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: systemImage)
-                .foregroundStyle(.secondary)
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Spacer()
+        @Environment(\.dismiss) private var dismiss
+        @State private var query: String = ""
+
+        private var filtered: [String] {
+            let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { return options }
+            return options.filter { $0.range(of: trimmed, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
         }
-        .accessibilityAddTraits(.isHeader)
-    }
-}
 
-private struct MenuPicker: View {
-    let title: String
-    @Binding var selection: String
-    let options: [String]
-    let includeOther: Bool
-    let otherMarker: String
+        var body: some View {
+            NavigationView {
+                List {
+                    Button {
+                        selection = ""
+                        dismiss()
+                    } label: {
+                        HStack {
+                            Text("— None —").fontWeight(selection.isEmpty ? .semibold : .regular)
+                            if selection.isEmpty { Spacer(); Image(systemName: "checkmark") }
+                        }
+                    }
 
-    var body: some View {
-        Picker(title, selection: $selection) {
-            Text("— None —").tag("")
-            ForEach(options, id: \.self) { Text($0).tag($0) }
-            if includeOther {
-                Text(otherMarker).tag(otherMarker)
-            }
-        }
-        .pickerStyle(.menu)
-        .labelsHidden()
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-}
+                    Section {
+                        ForEach(filtered, id: \.self) { name in
+                            Button {
+                                selection = name
+                                dismiss()
+                            } label: {
+                                HStack {
+                                    Text(name).fontWeight(selection == name ? .semibold : .regular)
+                                    if selection == name { Spacer(); Image(systemName: "checkmark") }
+                                }
+                            }
+                        }
+                    }
 
-private struct ModernTextField: View {
-    let placeholder: String
-    @Binding var text: String
-    var contentType: UITextContentType?
-    var capitalization: TextInputAutocapitalization = .never
-    var keyboard: UIKeyboardType = .default
-    var autocorrection: Bool = true
-
-    init(placeholder: String,
-         text: Binding<String>,
-         contentType: UITextContentType?,
-         capitalization: TextInputAutocapitalization = .never,
-         keyboard: UIKeyboardType = .default,
-         autocorrection: Bool = true) {
-        self.placeholder = placeholder
-        self._text = text
-        self.contentType = contentType
-        self.capitalization = capitalization
-        self.keyboard = keyboard
-        self.autocorrection = autocorrection
-    }
-
-    var body: some View {
-        TextField(placeholder, text: $text)
-            .textInputAutocapitalization(capitalization)
-            .keyboardType(keyboard)
-            .autocorrectionDisabled(!autocorrection)
-            .textContentType(contentType.map { .init($0) } ?? nil)
-            .padding(12)
-            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-}
-
-// MARK: - Status Overlay (Liquid glass toast)
-
-private struct StatusOverlayModifier: ViewModifier {
-    let text: String
-    @Binding var isPresented: Bool
-
-    func body(content: Content) -> some View {
-        content
-            .overlay(alignment: .bottom) {
-                if isPresented && !text.isEmpty {
-                    Text(text)
-                        .font(.callout)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 12)
-                        .background(.ultraThinMaterial)
-                        .clipShape(Capsule(style: .continuous))
-                        .shadow(color: Color.black.opacity(0.1), radius: 10, x: 0, y: 6)
-                        .padding(.bottom, 24)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                        .accessibilityAddTraits(.updatesFrequently)
+                    if includeOther {
+                        Section {
+                            Button {
+                                selection = otherMarker
+                                dismiss()
+                            } label: {
+                                HStack {
+                                    Text(otherMarker)
+                                    if selection == otherMarker { Spacer(); Image(systemName: "checkmark") }
+                                }
+                            }
+                        }
+                    }
+                }
+                .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search \(title)")
+                .navigationTitle(title)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { dismiss() }
+                    }
                 }
             }
+        }
     }
 }
 
 private extension View {
-    func statusOverlay(text: String, isPresented: Binding<Bool>) -> some View {
-        self.modifier(StatusOverlayModifier(text: text, isPresented: isPresented))
+    func errorHighlight(_ isError: Bool, cornerRadius: CGFloat = 12) -> some View {
+        self
+            .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .stroke(isError ? Color.red : Color.clear, lineWidth: 1.5)
+            )
+            .shadow(color: isError ? Color.red.opacity(0.15) : Color.clear, radius: 6)
     }
 }
 
 private extension String {
     var nilIfEmpty: String? { isEmpty ? nil : self }
+}
+
+// MARK: - Status overlay modifier
+
+private struct StatusOverlayView: View {
+    let text: String
+    @Binding var isPresented: Bool
+
+    var body: some View {
+        if isPresented && !text.isEmpty {
+            VStack {
+                Spacer()
+                HStack {
+                    Spacer()
+                    HStack(spacing: 8) {
+                        Image(systemName: "info.circle")
+                            .foregroundStyle(.secondary)
+                        Text(text)
+                            .foregroundStyle(.primary)
+                            .multilineTextAlignment(.leading)
+                            .lineLimit(3)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .background(.ultraThinMaterial, in: Capsule(style: .continuous))
+                    .shadow(color: Color.black.opacity(0.15), radius: 16, x: 0, y: 8)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityAddTraits(.isStaticText)
+                    .accessibilityLabel(text)
+                    Spacer()
+                }
+                .padding(.horizontal, 24)
+                .padding(.bottom, 24)
+            }
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .animation(.spring(response: 0.4, dampingFraction: 0.9), value: isPresented)
+        }
+    }
+}
+
+private extension View {
+    func statusOverlay(text: String, isPresented: Binding<Bool>) -> some View {
+        ZStack {
+            self
+            StatusOverlayView(text: text, isPresented: isPresented)
+        }
+    }
+}
+
+// MARK: - Helper to show status messages
+
+extension ContentView {
+    @MainActor
+    fileprivate func setStatus(_ message: String, visible: Bool) {
+        self.status = message
+        withAnimation {
+            self.showStatus = visible
+        }
+    }
+
+    fileprivate func show(_ message: String, success: Bool = false, duration: TimeInterval = 2.0) async {
+        await MainActor.run {
+            setStatus(message, visible: true)
+        }
+        // Keep it visible briefly, then hide
+        try? await Task.sleep(nanoseconds: UInt64((success ? max(1.2, duration) : duration) * 1_000_000_000))
+        await MainActor.run {
+            setStatus("", visible: false)
+        }
+    }
 }
