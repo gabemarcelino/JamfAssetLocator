@@ -343,12 +343,12 @@ struct JamfAPI {
 
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             let bodyStr = String(data: data, encoding: .utf8)
-            throw JamfAPIError.authFailed(status: http.statusCode, body: "Non‑JSON or unexpected body: \(bodyStr ?? "nil")")
+            throw JamfAPIError.authFailed(status: (resp as? HTTPURLResponse)?.statusCode, body: "Non‑JSON or unexpected body: \(bodyStr ?? "nil")")
         }
         if let token = json["access_token"] as? String {
             return token
         } else {
-            throw JamfAPIError.authFailed(status: http.statusCode, body: "Missing 'access_token' key. Body: \(json)")
+            throw JamfAPIError.authFailed(status: (resp as? HTTPURLResponse)?.statusCode, body: "Missing 'access_token' key. Body: \(json)")
         }
     }
 
@@ -451,8 +451,18 @@ struct JamfAPI {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             self.name = try c.decodeIfPresent(String.self, forKey: .name)
 
-            self.assetTag = try c.decodeIfPresent(String.self, forKey: .assetTag)
-                ?? c.decodeIfPresent(String.self, forKey: .asset_tag)
+            // Robust: assetTag may be string or number, and key may be assetTag or asset_tag
+            if let s = try c.decodeIfPresent(String.self, forKey: .assetTag) {
+                self.assetTag = s
+            } else if let i = try c.decodeIfPresent(Int.self, forKey: .assetTag) {
+                self.assetTag = String(i)
+            } else if let s2 = try c.decodeIfPresent(String.self, forKey: .asset_tag) {
+                self.assetTag = s2
+            } else if let i2 = try c.decodeIfPresent(Int.self, forKey: .asset_tag) {
+                self.assetTag = String(i2)
+            } else {
+                self.assetTag = nil
+            }
 
             if let s = try c.decodeIfPresent(String.self, forKey: .siteId) {
                 self.siteId = s
@@ -471,7 +481,7 @@ struct JamfAPI {
         }
     }
 
-    // New: v2 details endpoint (often contains assetTag + location)
+    // v2 details endpoint (your tenant returns assetTag at top level)
     struct MobileDeviceDetails: Decodable {
         struct General: Decodable {
             var assetTag: String?
@@ -480,12 +490,54 @@ struct JamfAPI {
             }
             init(from decoder: Decoder) throws {
                 let c = try decoder.container(keyedBy: CodingKeys.self)
-                self.assetTag = try c.decodeIfPresent(String.self, forKey: .assetTag)
-                    ?? c.decodeIfPresent(String.self, forKey: .asset_tag)
+                if let s = try c.decodeIfPresent(String.self, forKey: .assetTag) {
+                    self.assetTag = s
+                } else if let i = try c.decodeIfPresent(Int.self, forKey: .assetTag) {
+                    self.assetTag = String(i)
+                } else if let s2 = try c.decodeIfPresent(String.self, forKey: .asset_tag) {
+                    self.assetTag = s2
+                } else if let i2 = try c.decodeIfPresent(Int.self, forKey: .asset_tag) {
+                    self.assetTag = String(i2)
+                } else {
+                    self.assetTag = nil
+                }
             }
         }
+
+        var assetTag: String?          // NEW: top-level assetTag
         var general: General?
         var location: MobileDevice.Location?
+
+        enum CodingKeys: String, CodingKey {
+            case assetTag, asset_tag
+            case general
+            case location
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+
+            // Top-level assetTag (string or int)
+            if let s = try c.decodeIfPresent(String.self, forKey: .assetTag) {
+                self.assetTag = s
+            } else if let i = try c.decodeIfPresent(Int.self, forKey: .assetTag) {
+                self.assetTag = String(i)
+            } else if let s2 = try c.decodeIfPresent(String.self, forKey: .asset_tag) {
+                self.assetTag = s2
+            } else if let i2 = try c.decodeIfPresent(Int.self, forKey: .asset_tag) {
+                self.assetTag = String(i2)
+            } else {
+                self.assetTag = nil
+            }
+
+            self.general = try c.decodeIfPresent(General.self, forKey: .general)
+            self.location = try c.decodeIfPresent(MobileDevice.Location.self, forKey: .location)
+
+            // Fallback: some tenants only provide under general
+            if self.assetTag == nil {
+                self.assetTag = self.general?.assetTag
+            }
+        }
     }
 
     struct MobileDevicePatch: Codable {
@@ -505,22 +557,55 @@ struct JamfAPI {
             var room: String?
         }
         var location: Location?
+
+        // NEW: Modern EA updates
+        struct UpdatedExtensionAttribute: Codable {
+            var name: String
+            var type: String
+            var value: [String]
+            var extensionAttributeCollectionAllowed: Bool
+        }
+        var updatedExtensionAttributes: [UpdatedExtensionAttribute]?
     }
 
     // Fallback inventory model (richer payload; v1 inventory API)
     struct MobileDeviceInventory: Decodable {
+        struct General: Decodable {
+            var assetTag: String?
+            enum CodingKeys: String, CodingKey {
+                case assetTag, asset_tag
+            }
+            init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+                if let s = try c.decodeIfPresent(String.self, forKey: .assetTag) {
+                    self.assetTag = s
+                } else if let i = try c.decodeIfPresent(Int.self, forKey: .assetTag) {
+                    self.assetTag = String(i)
+                } else if let s2 = try c.decodeIfPresent(String.self, forKey: .asset_tag) {
+                    self.assetTag = s2
+                } else if let i2 = try c.decodeIfPresent(Int.self, forKey: .asset_tag) {
+                    self.assetTag = String(i2)
+                } else {
+                    self.assetTag = nil
+                }
+            }
+        }
+
         var assetTag: String?
         var location: MobileDevice.Location?
 
         enum CodingKeys: String, CodingKey {
-            case assetTag, asset_tag
+            case general
             case location
         }
 
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
-            self.assetTag = try c.decodeIfPresent(String.self, forKey: .assetTag)
-                ?? c.decodeIfPresent(String.self, forKey: .asset_tag)
+            if let general = try c.decodeIfPresent(General.self, forKey: .general) {
+                self.assetTag = general.assetTag
+            } else {
+                self.assetTag = nil
+            }
             self.location = try c.decodeIfPresent(MobileDevice.Location.self, forKey: .location)
         }
     }
@@ -531,6 +616,7 @@ struct JamfAPI {
         var req = req
         let token = try await validOAuthToken()
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        logRequest(req, redacting: ["Authorization"])
         let (data, resp) = try await URLSession.shared.data(for: req)
         guard let http = resp as? HTTPURLResponse else {
             throw JamfAPIError.badResponse(status: nil, body: "No HTTP response")
@@ -539,29 +625,75 @@ struct JamfAPI {
             if Self.shouldLog() {
                 print("✅ \(req.httpMethod ?? "GET") \(req.url?.absoluteString ?? "") -> \(http.statusCode)")
             }
-        } else if http.statusCode == 401 {
+            return (data, http)
+        }
+
+        if http.statusCode == 401 {
+            // Token likely expired; fetch a fresh one, update cache, retry once.
             if Self.shouldLog() {
-                print("🔁 401 Unauthorized, re-auth and retry: \(req.url?.absoluteString ?? "")")
+                print("🔁 401 Unauthorized, fetching a new OAuth token and retrying: \(req.url?.absoluteString ?? "")")
             }
-            let _ = try await fetchOAuthToken()
-            let token2 = try await validOAuthToken()
+            let newToken = try await fetchOAuthToken()
+            JamfAPI.setOAuthCache(token: newToken, expiry: Date().addingTimeInterval(25 * 60))
+
             var retry = req
-            retry.setValue("Bearer \(token2)", forHTTPHeaderField: "Authorization")
+            retry.setValue("Bearer \(newToken)", forHTTPHeaderField: "Authorization")
+            logRequest(retry, redacting: ["Authorization"])
             let (d2, r2) = try await URLSession.shared.data(for: retry)
             guard let h2 = r2 as? HTTPURLResponse else {
                 throw JamfAPIError.badResponse(status: nil, body: "No HTTP response (retry)")
             }
             if (200...299).contains(h2.statusCode) {
                 if Self.shouldLog() {
-                    print("✅ \(retry.httpMethod ?? "GET") \(retry.url?.absoluteString ?? "") -> \(h2.statusCode) (after retry)")
+                    print("✅ \(retry.httpMethod ?? "GET") \(retry.url?.absoluteString ?? "") -> \(h2.statusCode) (after token refresh)")
                 }
             } else if h2.statusCode == 403, Self.shouldLog() {
                 Self.logPrivilegeHint(method: retry.httpMethod, url: retry.url, status: h2.statusCode)
             }
             return (d2, h2)
-        } else if http.statusCode == 403, Self.shouldLog() {
+        }
+
+        if http.statusCode == 403, Self.shouldLog() {
             Self.logPrivilegeHint(method: req.httpMethod, url: req.url, status: http.statusCode)
         }
+        return (data, http)
+    }
+
+    // Classic helper with 401 retry
+    private mutating func authorizedClassicRequest(_ req: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        var req = req
+        let token = try await validClassicToken()
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        logRequest(req, redacting: ["Authorization"])
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse else {
+            throw JamfAPIError.badResponse(status: nil, body: "No HTTP response")
+        }
+        if (200...299).contains(http.statusCode) {
+            if Self.shouldLog() {
+                print("✅ \(req.httpMethod ?? "GET") \(req.url?.absoluteString ?? "") -> \(http.statusCode)")
+            }
+            return (data, http)
+        }
+
+        if http.statusCode == 401 {
+            if Self.shouldLog() {
+                print("🔁 401 Unauthorized (classic), fetching a new token and retrying: \(req.url?.absoluteString ?? "")")
+            }
+            // Get a fresh classic token and cache it
+            let newToken = try await JamfAPI.fetchClassicBearerToken(baseURL: baseURL, username: username, password: password)
+            JamfAPI.setClassicCache(token: newToken, expiry: Date().addingTimeInterval(25 * 60))
+
+            var retry = req
+            retry.setValue("Bearer \(newToken)", forHTTPHeaderField: "Authorization")
+            logRequest(retry, redacting: ["Authorization"])
+            let (d2, r2) = try await URLSession.shared.data(for: retry)
+            guard let h2 = r2 as? HTTPURLResponse else {
+                throw JamfAPIError.badResponse(status: nil, body: "No HTTP response (retry)")
+            }
+            return (d2, h2)
+        }
+
         return (data, http)
     }
 
@@ -653,7 +785,7 @@ struct JamfAPI {
         return try JSONDecoder().decode(MobileDevice.self, from: data)
     }
 
-    // New: richer v2 details endpoint (try before inventory)
+    // v2 details endpoint (try before inventory)
     mutating func getMobileDeviceDetailsModern(id: String) async throws -> MobileDeviceDetails? {
         let url = baseURL.appendingPathComponent("/api/v2/mobile-devices/\(id)/detail")
         var req = URLRequest(url: url)
@@ -910,32 +1042,40 @@ struct JamfAPI {
         Self.classicExpiry = expiry
     }
 
-    mutating func updateLocation(deviceID: String, username: String?, realName: String?, email: String?, building: String?, department: String?, room: String?) async throws {
-        let xml = buildLocationXML(username: username,
-                                   realName: realName,
-                                   email: email,
-                                   building: building,
-                                   department: department,
-                                   room: room)
+    mutating func updateLocation(
+        deviceID: String,
+        username: String?,
+        realName: String?,
+        email: String?,
+        building: String?,
+        department: String?,
+        room: String?,
+        assetTag: String?
+    ) async throws {
+        let xml = buildMobileDeviceUpdateXML(
+            assetTag: assetTag,
+            username: username,
+            realName: realName,
+            email: email,
+            building: building,
+            department: department,
+            room: room
+        )
         guard let body = xml.data(using: .utf8) else { throw JamfAPIError.badResponse(status: nil, body: "Unable to encode XML") }
 
-        let token = try await validClassicToken()
         let url = baseURL.appendingPathComponent("/JSSResource/mobiledevices/id/\(deviceID)")
         var req = URLRequest(url: url)
         req.httpMethod = "PUT"
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("application/xml", forHTTPHeaderField: "Content-Type")
         req.setValue("application/xml", forHTTPHeaderField: "Accept")
         req.httpBody = body
 
-        logRequest(req, redacting: ["Authorization"], bodyPreview: xml)
+        let (data, http) = try await authorizedClassicRequest(req)
 
-        let (data, resp) = try await URLSession.shared.data(for: req)
-
-        guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+        guard (200...299).contains(http.statusCode) else {
             let bodyStr = String(data: data, encoding: .utf8)
             logBodyIfError(bodyStr)
-            throw JamfAPIError.badResponse(status: (resp as? HTTPURLResponse)?.statusCode, body: bodyStr)
+            throw JamfAPIError.badResponse(status: http.statusCode, body: bodyStr)
         }
     }
 
@@ -960,21 +1100,19 @@ struct JamfAPI {
     }
 
     mutating func diagnoseClassicAccess(deviceID: String) async throws -> String {
-        let token = try await validClassicToken()
         let url = baseURL.appendingPathComponent("/JSSResource/mobiledevices/id/\(deviceID)")
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("application/xml", forHTTPHeaderField: "Accept")
 
         logRequest(req, redacting: ["Authorization"])
 
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, http) = try await authorizedClassicRequest(req)
 
-        guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+        guard (200...299).contains(http.statusCode) else {
             let bodyStr = String(data: data, encoding: .utf8)
             logBodyIfError(bodyStr)
-            throw JamfAPIError.badResponse(status: (resp as? HTTPURLResponse)?.statusCode, body: bodyStr)
+            throw JamfAPIError.badResponse(status: http.statusCode, body: bodyStr)
         }
         let xml = String(data: data, encoding: .utf8) ?? ""
         let preview = String(xml.prefix(2048))
@@ -989,20 +1127,16 @@ struct JamfAPI {
             return modern.map { $0.name }
         }
 
-        let token = try await validClassicToken()
         let url = baseURL.appendingPathComponent("/JSSResource/buildings")
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("application/xml", forHTTPHeaderField: "Accept")
 
-        logRequest(req, redacting: ["Authorization"])
-
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+        let (data, http) = try await authorizedClassicRequest(req)
+        guard (200...299).contains(http.statusCode) else {
             let bodyStr = String(data: data, encoding: .utf8)
             logBodyIfError(bodyStr)
-            throw JamfAPIError.badResponse(status: (resp as? HTTPURLResponse)?.statusCode, body: bodyStr)
+            throw JamfAPIError.badResponse(status: http.statusCode, body: bodyStr)
         }
 
         let xml = String(data: data, encoding: .utf8) ?? ""
@@ -1026,20 +1160,16 @@ struct JamfAPI {
             return modern.map { $0.name }
         }
 
-        let token = try await validClassicToken()
         let url = baseURL.appendingPathComponent("/JSSResource/departments")
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("application/xml", forHTTPHeaderField: "Accept")
 
-        logRequest(req, redacting: ["Authorization"])
-
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+        let (data, http) = try await authorizedClassicRequest(req)
+        guard (200...299).contains(http.statusCode) else {
             let bodyStr = String(data: data, encoding: .utf8)
             logBodyIfError(bodyStr)
-            throw JamfAPIError.badResponse(status: (resp as? HTTPURLResponse)?.statusCode, body: bodyStr)
+            throw JamfAPIError.badResponse(status: http.statusCode, body: bodyStr)
         }
 
         let xml = String(data: data, encoding: .utf8) ?? ""
@@ -1125,7 +1255,7 @@ struct JamfAPI {
         if (loc == nil) || (tag == nil) {
             do {
                 if let details = try await getMobileDeviceDetailsModern(id: id) {
-                    if tag == nil { tag = details.general?.assetTag }
+                    if tag == nil { tag = details.assetTag ?? details.general?.assetTag }
                     if loc == nil { loc = details.location }
                 }
             } catch {
@@ -1169,20 +1299,18 @@ struct JamfAPI {
     }
 
     mutating func fetchCurrentLocationClassic(id: String) async throws -> LocationSnapshot {
-        let token = try await validClassicToken()
         let url = baseURL.appendingPathComponent("/JSSResource/mobiledevices/id/\(id)")
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("application/xml", forHTTPHeaderField: "Accept")
 
         logRequest(req, redacting: ["Authorization"])
 
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+        let (data, http) = try await authorizedClassicRequest(req)
+        guard (200...299).contains(http.statusCode) else {
             let bodyStr = String(data: data, encoding: .utf8)
             logBodyIfError(bodyStr)
-            throw JamfAPIError.badResponse(status: (resp as? HTTPURLResponse)?.statusCode, body: bodyStr)
+            throw JamfAPIError.badResponse(status: http.statusCode, body: bodyStr)
         }
         let xml = String(data: data, encoding: .utf8) ?? ""
 
@@ -1214,10 +1342,29 @@ struct JamfAPI {
 
     // MARK: - Helpers
 
-    private func buildLocationXML(username: String?, realName: String?, email: String?, building: String?, department: String?, room: String?) -> String {
+    private func buildMobileDeviceUpdateXML(
+        assetTag: String?,
+        username: String?,
+        realName: String?,
+        email: String?,
+        building: String?,
+        department: String?,
+        room: String?
+    ) -> String {
         func tag(_ name: String, _ value: String?) -> String { value.map { "<\(name)>\($0.xmlEscaped)</\(name)>" } ?? "" }
+
+        let generalSection: String = {
+            guard let assetTag else { return "" }
+            return """
+              <general>
+                \(tag("asset_tag", assetTag))
+              </general>
+            """
+        }()
+
         return """
         <mobile_device>
+        \(generalSection)
           <location>
             \(tag("username", username))
             \(tag("real_name", realName))

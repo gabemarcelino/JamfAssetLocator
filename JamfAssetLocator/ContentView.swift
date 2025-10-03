@@ -647,13 +647,29 @@ struct ContentView: View {
                     buildingId: buildingId,
                     room: room.nilIfEmpty
                 )
+
+                // NEW: include EA stamp via modern PATCH if configured
+                var eaArray: [JamfAPI.MobileDevicePatch.UpdatedExtensionAttribute]? = nil
+                if let eaName = config.jamfEAName?.nilIfEmpty, config.jamfEAOnSubmit {
+                    let stamp = eaTimestampString()
+                    eaArray = [
+                        .init(
+                            name: eaName,
+                            type: config.jamfEAType,
+                            value: [stamp],
+                            extensionAttributeCollectionAllowed: config.jamfEACollectionAllowed
+                        )
+                    ]
+                }
+
                 let patch = JamfAPI.MobileDevicePatch(
                     name: nil,
                     enforceName: nil,
                     assetTag: assetTag.nilIfEmpty,
                     siteId: nil,
                     timeZone: nil,
-                    location: loc
+                    location: loc,
+                    updatedExtensionAttributes: eaArray
                 )
 
                 var api2 = api
@@ -677,12 +693,30 @@ struct ContentView: View {
                                           email: email.nilIfEmpty,
                                           building: buildingValue,
                                           department: departmentValue,
-                                          room: room.nilIfEmpty)
+                                          room: room.nilIfEmpty,
+                                          assetTag: assetTag.nilIfEmpty)
             await show("✓ Updated in Jamf (classic)", success: true)
         } catch let err as JamfAPIError {
             await show("Update failed (classic): \(err.description)")
         } catch {
             await show("Update failed (classic): \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - EA timestamp formatting
+
+    private func eaTimestampString() -> String {
+        if let fmt = config.jamfEADateFormat?.nilIfEmpty {
+            let df = DateFormatter()
+            df.locale = Locale(identifier: "en_US_POSIX")
+            df.timeZone = TimeZone(secondsFromGMT: 0) // UTC for predictability
+            df.dateFormat = fmt
+            return df.string(from: Date())
+        } else {
+            let iso = ISO8601DateFormatter()
+            iso.formatOptions = [.withInternetDateTime]
+            iso.timeZone = TimeZone(secondsFromGMT: 0)
+            return iso.string(from: Date())
         }
     }
 
@@ -912,3 +946,4 @@ extension ContentView {
         }
     }
 }
+
